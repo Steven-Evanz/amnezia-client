@@ -52,22 +52,29 @@ namespace {
     {
         if (key.isEmpty()
             || key.compare(QLatin1String("None"), Qt::CaseInsensitive) == 0
-            || key.compare(QLatin1String("Path"), Qt::CaseInsensitive) == 0) {
+            || key.compare(QLatin1String("Path"), Qt::CaseInsensitive) == 0
+            || key.compare(QLatin1String("Header"), Qt::CaseInsensitive) == 0
+            || key.compare(QLatin1String("Cookie"), Qt::CaseInsensitive) == 0
+            || key.compare(QLatin1String("Query"), Qt::CaseInsensitive) == 0) {
             return {};
         }
         return key;
     }
 
-    QString normalizeUplinkDataPlacement(const QString &p)
+    QString normalizeUplinkDataPlacement(const QString &mode, const QString &p)
     {
+        const bool packetUp = mode == QLatin1String("packet-up");
         if (p.isEmpty() || p.compare(QLatin1String("Body"), Qt::CaseInsensitive) == 0)
             return QStringLiteral("body");
         if (p.compare(QLatin1String("Auto"), Qt::CaseInsensitive) == 0)
             return QStringLiteral("auto");
+        if (p.compare(QLatin1String("Header"), Qt::CaseInsensitive) == 0)
+            return packetUp ? QStringLiteral("header") : QStringLiteral("body");
+        if (p.compare(QLatin1String("Cookie"), Qt::CaseInsensitive) == 0)
+            return packetUp ? QStringLiteral("cookie") : QStringLiteral("body");
         if (p.compare(QLatin1String("Query"), Qt::CaseInsensitive) == 0)
-            // "Query" is not valid for uplink payload in splithttp; closest documented mode
-            return QStringLiteral("header");
-        return p.toLower();
+            return packetUp ? QStringLiteral("auto") : QStringLiteral("body");
+        return packetUp ? p.toLower() : QStringLiteral("body");
     }
 
     // splithttp: cookie | header | query | queryInHeader (not "body")
@@ -106,6 +113,22 @@ namespace {
             return min;
         }
         return QStringLiteral("%1-%2").arg(min).arg(max);
+    }
+
+    int rangeUpperBound(const QJsonValue &v)
+    {
+        if (v.isDouble()) {
+            return v.toInt();
+        }
+        const QString s = v.toString().trimmed();
+        if (s.isEmpty()) {
+            return 0;
+        }
+        const int dash = s.indexOf(QLatin1Char('-'));
+        if (dash >= 0) {
+            return s.mid(dash + 1).toInt();
+        }
+        return s.toInt();
     }
 
     void putIntRangeIfAny(QJsonObject &obj, const char *key, QString minV, QString maxV, const char *fallbackMin,
@@ -540,7 +563,8 @@ QJsonObject XrayConfigurator::buildStreamSettings(const XrayServerConfig &srv, c
         xo[QStringLiteral("host")] = hostEff;
         if (!xhttp.path.isEmpty())
             xo[QStringLiteral("path")] = xhttp.path;
-        xo[QStringLiteral("mode")] = normalizeXhttpMode(xhttp.mode);
+        const QString modeEff = normalizeXhttpMode(xhttp.mode);
+        xo[QStringLiteral("mode")] = modeEff;
 
         const QString methodEff =
                 xhttp.uplinkMethod.isEmpty() ? QString::fromLatin1(px::defaultXhttpUplinkMethod) : xhttp.uplinkMethod;
@@ -550,21 +574,34 @@ QJsonObject XrayConfigurator::buildStreamSettings(const XrayServerConfig &srv, c
         xo[QStringLiteral("noSSEHeader")] = xhttp.disableSse;
 
         const QString sessPl = normalizeSessionSeqPlacement(xhttp.sessionPlacement);
+        QString seqPl = normalizeSessionSeqPlacement(xhttp.seqPlacement);
+        if (sessPl.isEmpty()) {
+            // Xray requires seqPlacement=path when sessionPlacement=path; omit both implicit defaults.
+            seqPl.clear();
+        }
         if (!sessPl.isEmpty())
             xo[QStringLiteral("sessionPlacement")] = sessPl;
-        const QString seqPl = normalizeSessionSeqPlacement(xhttp.seqPlacement);
         if (!seqPl.isEmpty())
             xo[QStringLiteral("seqPlacement")] = seqPl;
-        const QString sessionKey = normalizeOptionalXhttpKey(xhttp.sessionKey);
+        QString sessionKey = normalizeOptionalXhttpKey(xhttp.sessionKey);
+        if (sessPl.isEmpty()) {
+            sessionKey.clear();
+        }
         if (!sessionKey.isEmpty())
             xo[QStringLiteral("sessionKey")] = sessionKey;
-        const QString seqKey = normalizeOptionalXhttpKey(xhttp.seqKey);
+        QString seqKey = normalizeOptionalXhttpKey(xhttp.seqKey);
+        if (seqPl.isEmpty()) {
+            seqKey.clear();
+        }
         if (!seqKey.isEmpty())
             xo[QStringLiteral("seqKey")] = seqKey;
 
-        xo[QStringLiteral("uplinkDataPlacement")] = normalizeUplinkDataPlacement(xhttp.uplinkDataPlacement);
-        if (!xhttp.uplinkDataKey.isEmpty())
-            xo[QStringLiteral("uplinkDataKey")] = xhttp.uplinkDataKey;
+        const QString uplinkPlacement = normalizeUplinkDataPlacement(modeEff, xhttp.uplinkDataPlacement);
+        xo[QStringLiteral("uplinkDataPlacement")] = uplinkPlacement;
+        const QString uplinkDataKey = normalizeOptionalXhttpKey(xhttp.uplinkDataKey);
+        if (!uplinkDataKey.isEmpty() && uplinkPlacement != QLatin1String("body")) {
+            xo[QStringLiteral("uplinkDataKey")] = uplinkDataKey;
+        }
 
         const QString ucs = xhttp.uplinkChunkSize.isEmpty() ? QString::fromLatin1(px::defaultXhttpUplinkChunkSize)
                                                             : xhttp.uplinkChunkSize;
@@ -607,7 +644,10 @@ QJsonObject XrayConfigurator::buildStreamSettings(const XrayServerConfig &srv, c
                     return;
                 const QString min = a.isEmpty() ? QStringLiteral("0") : a;
                 const QString max = b.isEmpty() ? QStringLiteral("0") : b;
-                mux[QString::fromUtf8(key)] = makeIntRangeValue(min, max);
+                const QJsonValue rangeValue = makeIntRangeValue(min, max);
+                if (rangeUpperBound(rangeValue) > 0) {
+                    mux[QString::fromUtf8(key)] = rangeValue;
+                }
             };
             addMuxRange("maxConcurrency", xhttp.xmux.maxConcurrencyMin, xhttp.xmux.maxConcurrencyMax);
             addMuxRange("maxConnections", xhttp.xmux.maxConnectionsMin, xhttp.xmux.maxConnectionsMax);
@@ -616,6 +656,10 @@ QJsonObject XrayConfigurator::buildStreamSettings(const XrayServerConfig &srv, c
             addMuxRange("hMaxReusableSecs", xhttp.xmux.hMaxReusableSecsMin, xhttp.xmux.hMaxReusableSecsMax);
             if (!xhttp.xmux.hKeepAlivePeriod.isEmpty())
                 mux[QStringLiteral("hKeepAlivePeriod")] = xhttp.xmux.hKeepAlivePeriod.toLongLong();
+            if (rangeUpperBound(mux.value(QStringLiteral("maxConcurrency"))) > 0
+                && rangeUpperBound(mux.value(QStringLiteral("maxConnections"))) > 0) {
+                mux.remove(QStringLiteral("maxConnections"));
+            }
             if (!mux.isEmpty())
                 xo[QStringLiteral("xmux")] = mux;
         }
