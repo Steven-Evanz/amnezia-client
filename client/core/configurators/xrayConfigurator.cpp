@@ -37,12 +37,25 @@ namespace {
         return t.toLower();
     }
 
-    // Xray-core: empty → path; "None" in UI → omit (core default path)
+    // Xray-core: path is the implicit default; do not serialize it explicitly.
     QString normalizeSessionSeqPlacement(const QString &p)
     {
-        if (p.isEmpty() || p.compare(QLatin1String("None"), Qt::CaseInsensitive) == 0)
+        if (p.isEmpty()
+            || p.compare(QLatin1String("None"), Qt::CaseInsensitive) == 0
+            || p.compare(QLatin1String("Path"), Qt::CaseInsensitive) == 0) {
             return {};
+        }
         return p.toLower();
+    }
+
+    QString normalizeOptionalXhttpKey(const QString &key)
+    {
+        if (key.isEmpty()
+            || key.compare(QLatin1String("None"), Qt::CaseInsensitive) == 0
+            || key.compare(QLatin1String("Path"), Qt::CaseInsensitive) == 0) {
+            return {};
+        }
+        return key;
     }
 
     QString normalizeUplinkDataPlacement(const QString &p)
@@ -542,10 +555,12 @@ QJsonObject XrayConfigurator::buildStreamSettings(const XrayServerConfig &srv, c
         const QString seqPl = normalizeSessionSeqPlacement(xhttp.seqPlacement);
         if (!seqPl.isEmpty())
             xo[QStringLiteral("seqPlacement")] = seqPl;
-        if (!xhttp.sessionKey.isEmpty())
-            xo[QStringLiteral("sessionKey")] = xhttp.sessionKey;
-        if (!xhttp.seqKey.isEmpty())
-            xo[QStringLiteral("seqKey")] = xhttp.seqKey;
+        const QString sessionKey = normalizeOptionalXhttpKey(xhttp.sessionKey);
+        if (!sessionKey.isEmpty())
+            xo[QStringLiteral("sessionKey")] = sessionKey;
+        const QString seqKey = normalizeOptionalXhttpKey(xhttp.seqKey);
+        if (!seqKey.isEmpty())
+            xo[QStringLiteral("seqKey")] = seqKey;
 
         xo[QStringLiteral("uplinkDataPlacement")] = normalizeUplinkDataPlacement(xhttp.uplinkDataPlacement);
         if (!xhttp.uplinkDataKey.isEmpty())
