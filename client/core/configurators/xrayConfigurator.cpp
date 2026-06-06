@@ -85,6 +85,16 @@ namespace {
         return t.toLower();
     }
 
+    QJsonValue makeIntRangeValue(QString minV, QString maxV)
+    {
+        const int min = minV.toInt();
+        const int max = maxV.toInt();
+        if (min == max) {
+            return min;
+        }
+        return QStringLiteral("%1-%2").arg(min).arg(max);
+    }
+
     void putIntRangeIfAny(QJsonObject &obj, const char *key, QString minV, QString maxV, const char *fallbackMin,
                           const char *fallbackMax)
     {
@@ -94,10 +104,21 @@ namespace {
             minV = QString::fromLatin1(fallbackMin);
         if (maxV.isEmpty())
             maxV = QString::fromLatin1(fallbackMax);
-        QJsonObject r;
-        r[QStringLiteral("from")] = minV.toInt();
-        r[QStringLiteral("to")] = maxV.toInt();
-        obj[QString::fromUtf8(key)] = r;
+        obj[QString::fromUtf8(key)] = makeIntRangeValue(minV, maxV);
+    }
+
+    QString effectiveVlessFlow(const amnezia::XrayServerConfig &srv)
+    {
+        if (srv.transport == QLatin1String("xhttp")) {
+            return {};
+        }
+        if (!srv.flow.isEmpty()) {
+            return srv.flow;
+        }
+        if (srv.security == QLatin1String("reality")) {
+            return QStringLiteral("xtls-rprx-vision");
+        }
+        return {};
     }
 
     // Desktop applies this in XrayProtocol::start(); iOS/Android pass JSON straight to libxray — same fixes here.
@@ -244,10 +265,7 @@ ErrorCode XrayConfigurator::applyServerSettingsToRemote(const ServerCredentials 
                     << "container=" << static_cast<int>(container) << "host=" << credentials.hostName
                     << "transport=" << srv.transport << "security=" << srv.security << "port=" << srv.port
                     << "appendClient=" << appendNewClient;
-    QString flowValue = srv.flow;
-    if (flowValue.isEmpty() && srv.security == QLatin1String("reality")) {
-        flowValue = QStringLiteral("xtls-rprx-vision");
-    }
+    QString flowValue = effectiveVlessFlow(srv);
 
     QString realityPublicKey;
     QString realityShortId;
@@ -405,8 +423,9 @@ XrayProtocolConfig XrayConfigurator::buildClientProtocolConfig(const ServerCrede
     QJsonObject userObj;
     userObj[amnezia::protocols::xray::id] = clientId;
     userObj[amnezia::protocols::xray::encryption] = QStringLiteral("none");
-    if (!srv.flow.isEmpty()) {
-        userObj[amnezia::protocols::xray::flow] = srv.flow;
+    const QString flowValue = effectiveVlessFlow(srv);
+    if (!flowValue.isEmpty()) {
+        userObj[amnezia::protocols::xray::flow] = flowValue;
     }
 
     QJsonObject vnextEntry;
@@ -510,12 +529,6 @@ QJsonObject XrayConfigurator::buildStreamSettings(const XrayServerConfig &srv, c
             xo[QStringLiteral("path")] = xhttp.path;
         xo[QStringLiteral("mode")] = normalizeXhttpMode(xhttp.mode);
 
-        if (xhttp.headersTemplate.compare(QLatin1String("HTTP"), Qt::CaseInsensitive) == 0) {
-            QJsonObject headers;
-            headers[QStringLiteral("Host")] = hostEff;
-            xo[QStringLiteral("headers")] = headers;
-        }
-
         const QString methodEff =
                 xhttp.uplinkMethod.isEmpty() ? QString::fromLatin1(px::defaultXhttpUplinkMethod) : xhttp.uplinkMethod;
         xo[QStringLiteral("uplinkHTTPMethod")] = methodEff.toUpper();
@@ -541,11 +554,7 @@ QJsonObject XrayConfigurator::buildStreamSettings(const XrayServerConfig &srv, c
         const QString ucs = xhttp.uplinkChunkSize.isEmpty() ? QString::fromLatin1(px::defaultXhttpUplinkChunkSize)
                                                             : xhttp.uplinkChunkSize;
         if (!ucs.isEmpty() && ucs != QLatin1String("0")) {
-            const int v = ucs.toInt();
-            QJsonObject chunkR;
-            chunkR[QStringLiteral("from")] = v;
-            chunkR[QStringLiteral("to")] = v;
-            xo[QStringLiteral("uplinkChunkSize")] = chunkR;
+            xo[QStringLiteral("uplinkChunkSize")] = ucs.toInt();
         }
 
         if (!xhttp.scMaxBufferedPosts.isEmpty())
@@ -562,11 +571,10 @@ QJsonObject XrayConfigurator::buildStreamSettings(const XrayServerConfig &srv, c
         xo[QStringLiteral("xPaddingObfsMode")] = pad.obfsMode;
         if (pad.obfsMode) {
             if (!pad.bytesMin.isEmpty() || !pad.bytesMax.isEmpty()) {
-                QJsonObject br;
-                br[QStringLiteral("from")] = pad.bytesMin.isEmpty() ? 1 : pad.bytesMin.toInt();
-                br[QStringLiteral("to")] = pad.bytesMax.isEmpty() ? (pad.bytesMin.isEmpty() ? 256 : pad.bytesMin.toInt())
-                                                                  : pad.bytesMax.toInt();
-                xo[QStringLiteral("xPaddingBytes")] = br;
+                const QString min = pad.bytesMin.isEmpty() ? QStringLiteral("1") : pad.bytesMin;
+                const QString max = pad.bytesMax.isEmpty() ? (pad.bytesMin.isEmpty() ? QStringLiteral("256") : min)
+                                                           : pad.bytesMax;
+                xo[QStringLiteral("xPaddingBytes")] = makeIntRangeValue(min, max);
             }
             xo[QStringLiteral("xPaddingKey")] = pad.key.isEmpty() ? QStringLiteral("x_padding") : pad.key;
             xo[QStringLiteral("xPaddingHeader")] = pad.header.isEmpty() ? QStringLiteral("X-Padding") : pad.header;
@@ -582,10 +590,9 @@ QJsonObject XrayConfigurator::buildStreamSettings(const XrayServerConfig &srv, c
             auto addMuxRange = [&](const char *key, const QString &a, const QString &b) {
                 if (a.isEmpty() && b.isEmpty())
                     return;
-                QJsonObject r;
-                r[QStringLiteral("from")] = a.isEmpty() ? 0 : a.toInt();
-                r[QStringLiteral("to")] = b.isEmpty() ? 0 : b.toInt();
-                mux[QString::fromUtf8(key)] = r;
+                const QString min = a.isEmpty() ? QStringLiteral("0") : a;
+                const QString max = b.isEmpty() ? QStringLiteral("0") : b;
+                mux[QString::fromUtf8(key)] = makeIntRangeValue(min, max);
             };
             addMuxRange("maxConcurrency", xhttp.xmux.maxConcurrencyMin, xhttp.xmux.maxConcurrencyMax);
             addMuxRange("maxConnections", xhttp.xmux.maxConnectionsMin, xhttp.xmux.maxConnectionsMax);
